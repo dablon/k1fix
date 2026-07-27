@@ -1,0 +1,8 @@
+id = "k1"
+name = "Creality K1"
+bed_x_mm = 220.0
+bed_y_mm = 220.0
+build_z_mm = 250.0
+nozzle_mm = 0.4
+layer_height_mm = 0.2
+default_margin_mm = 3.0

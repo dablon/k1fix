@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+**/*.md
+!README.md
+coverage/
+.idea/
+.vscode/
+*.profraw
+*.profdata
+tmp/
+.cursor/
+agent-tools/

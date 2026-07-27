@@ -1,0 +1,93 @@
+services:
+  dev:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    command: ["bash"]
+
+  test:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+    command: ["cargo", "test", "--tests"]
+
+  lint:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+    command:
+      - bash
+      - -lc
+      - |
+        cargo fmt --all -- --check
+        cargo clippy --all-targets -- -D warnings
+
+  coverage:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+    command:
+      - bash
+      - -lc
+      - |
+        rustup component add llvm-tools-preview
+        cargo llvm-cov --all-features \
+          --ignore-filename-regex '(main\.rs|examples/)' \
+          --fail-under-lines 80 \
+          --html --output-dir coverage
+
+  e2e:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+    working_dir: /app
+    command:
+      - bash
+      - -lc
+      - |
+        cargo build --release --bin k1fix
+        cargo test --release --test e2e
+
+  runtime:
+    build:
+      context: .
+      target: runtime
+    volumes:
+      - .:/work
+    working_dir: /work
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-cache:
