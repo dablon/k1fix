@@ -14,6 +14,8 @@ pub struct AutofitOptions {
     pub margin: f64,
     /// Allow uniform scale when rotation alone is insufficient.
     pub scale_to_fit: bool,
+    /// Prefer low Z (easier to print) over maximizing bed-contact alone.
+    pub prefer_flat: bool,
 }
 
 impl Default for AutofitOptions {
@@ -21,6 +23,7 @@ impl Default for AutofitOptions {
         Self {
             margin: 3.0,
             scale_to_fit: false,
+            prefer_flat: true,
         }
     }
 }
@@ -157,14 +160,23 @@ pub fn fits(mesh: &IndexedMesh, profile: &PrinterProfile, margin: f64) -> bool {
 }
 
 /// Score a placed mesh: higher is better.
-fn score(mesh: &IndexedMesh, profile: &PrinterProfile, margin: f64) -> Option<(f64, f64, f64)> {
+fn score(
+    mesh: &IndexedMesh,
+    profile: &PrinterProfile,
+    margin: f64,
+    prefer_flat: bool,
+) -> Option<(f64, f64, f64)> {
     if !fits(mesh, profile, margin) {
         return None;
     }
     let contact = bed_contact_area(mesh);
     let height = mesh.aabb().extents().z;
-    // lexicographic via weighted tuple: contact desc, height asc
-    Some((contact, -height, 0.0))
+    if prefer_flat {
+        // Printability first: short Z, then more bed contact.
+        Some((-height, contact, 0.0))
+    } else {
+        Some((contact, -height, 0.0))
+    }
 }
 
 fn bed_contact_area(mesh: &IndexedMesh) -> f64 {
@@ -308,7 +320,12 @@ pub fn autofit(
         vec![Box::new(AxisAligned24), Box::new(PcaObbFaces)];
 
     let original = mesh.clone();
-    let mut best: Option<(IndexedMesh, f64, f64, f64)> = None; // mesh, scale, contact, -height
+    let shortest = {
+        let e = original.aabb().extents();
+        e.x.min(e.y).min(e.z)
+    };
+    // mesh, scale, primary score key, secondary
+    let mut best: Option<(IndexedMesh, f64, f64, f64)> = None;
 
     for gen in &generators {
         for rot in gen.candidates(&original) {
@@ -319,82 +336,133 @@ pub fn autofit(
             let yaw_m = Rotation3::from_axis_angle(&Vector3::z_axis(), yaw).into_inner();
             candidate.transform_linear(&yaw_m);
             place_on_bed(&mut candidate, profile);
-            if let Some((contact, neg_h, _)) = score(&candidate, profile, opts.margin) {
+            if let Some((a, b, _)) = score(&candidate, profile, opts.margin, opts.prefer_flat) {
                 let replace = match &best {
                     None => true,
-                    Some((_, _, bc, bh)) => {
-                        contact > *bc + 1e-9 || ((contact - *bc).abs() < 1e-9 && neg_h > *bh)
-                    }
+                    Some((_, _, ba, bb)) => a > *ba + 1e-9 || ((a - *ba).abs() < 1e-9 && b > *bb),
                 };
                 if replace {
-                    best = Some((candidate, 1.0, contact, neg_h));
+                    best = Some((candidate, 1.0, a, b));
                 }
             }
         }
     }
 
     if let Some((fitted, scale, _, _)) = best {
-        *mesh = fitted;
-        return Ok(AutofitResult {
-            scale,
-            summary: "oriented and placed on bed".into(),
-        });
-    }
+        let height = fitted.aabb().extents().z;
+        let upright = opts.prefer_flat && height > shortest * 2.5;
 
-    if opts.scale_to_fit {
-        // Pick the orientation with minimal required uniform scale.
-        let mut best_scaled: Option<(IndexedMesh, f64)> = None;
-        for gen in &generators {
-            for rot in gen.candidates(&original) {
-                let mut candidate = original.clone();
-                candidate.transform_linear(&rot);
-                let (ux, uy) = profile.usable_bed_area(opts.margin);
-                let yaw = best_yaw_for_bed(&candidate, ux, uy);
-                candidate.transform_linear(
-                    &Rotation3::from_axis_angle(&Vector3::z_axis(), yaw).into_inner(),
-                );
-                let e = candidate.aabb().extents();
-                let sx = if e.x > 1e-12 { ux / e.x } else { 1.0 };
-                let sy = if e.y > 1e-12 { uy / e.y } else { 1.0 };
-                let sz = if e.z > 1e-12 {
-                    profile.build_z_mm / e.z
-                } else {
-                    1.0
-                };
-                let s = sx.min(sy).min(sz);
-                if s <= 0.0 {
-                    continue;
-                }
-                candidate.scale_uniform(s);
-                place_on_bed(&mut candidate, profile);
-                if fits(&candidate, profile, opts.margin) {
-                    let replace = match &best_scaled {
-                        None => true,
-                        Some((_, bs)) => s > *bs,
-                    };
-                    if replace {
-                        best_scaled = Some((candidate, s));
-                    }
+        // With --scale-to-fit + prefer_flat, a short scaled pose beats a tall unscaled tower.
+        if upright && opts.scale_to_fit {
+            if let Some((scaled, s, h)) =
+                best_scaled_candidate(&generators, &original, profile, opts)
+            {
+                if h < height * 0.5 {
+                    *mesh = scaled;
+                    return Ok(AutofitResult {
+                        scale: s,
+                        summary: format!(
+                            "scaled to {:.1}% for flat print (height {:.1} mm)",
+                            s * 100.0,
+                            h
+                        ),
+                    });
                 }
             }
         }
-        if let Some((fitted, scale)) = best_scaled {
+
+        *mesh = fitted;
+        let summary = if upright {
+            format!(
+                "oriented upright ({height:.1} mm tall) — for a flat print use --scale-to-fit"
+            )
+        } else {
+            "oriented and placed on bed".into()
+        };
+        return Ok(AutofitResult { scale, summary });
+    }
+
+    if opts.scale_to_fit {
+        if let Some((fitted, scale, height)) =
+            best_scaled_candidate(&generators, &original, profile, opts)
+        {
             *mesh = fitted;
             return Ok(AutofitResult {
                 scale,
-                summary: format!("scaled to {:.2}% and placed on bed", scale * 100.0),
+                summary: format!(
+                    "scaled to {:.1}% (height {:.1} mm) and placed on bed",
+                    scale * 100.0,
+                    height
+                ),
             });
         }
     }
 
     let e = original.aabb().extents();
     let (ux, uy) = profile.usable_bed_area(opts.margin);
+    let hint = if opts.prefer_flat && !opts.scale_to_fit {
+        " — flat print needs --scale-to-fit (or split the part)"
+    } else {
+        " — split the part or pass --scale-to-fit"
+    };
     Err(K1FixError::DoesNotFit {
         detail: format!(
-            "footprint {:.2}x{:.2}x{:.2} mm vs usable {:.2}x{:.2}x{:.2} mm — split the part or pass --scale-to-fit",
+            "footprint {:.2}x{:.2}x{:.2} mm vs usable {:.2}x{:.2}x{:.2} mm{hint}",
             e.x, e.y, e.z, ux, uy, profile.build_z_mm
         ),
     })
+}
+
+fn best_scaled_candidate(
+    generators: &[Box<dyn OrientationGenerator>],
+    original: &IndexedMesh,
+    profile: &PrinterProfile,
+    opts: &AutofitOptions,
+) -> Option<(IndexedMesh, f64, f64)> {
+    let mut best_scaled: Option<(IndexedMesh, f64, f64)> = None;
+    for gen in generators {
+        for rot in gen.candidates(original) {
+            let mut candidate = original.clone();
+            candidate.transform_linear(&rot);
+            let (ux, uy) = profile.usable_bed_area(opts.margin);
+            let yaw = best_yaw_for_bed(&candidate, ux, uy);
+            candidate.transform_linear(
+                &Rotation3::from_axis_angle(&Vector3::z_axis(), yaw).into_inner(),
+            );
+            let e = candidate.aabb().extents();
+            let sx = if e.x > 1e-12 { ux / e.x } else { 1.0 };
+            let sy = if e.y > 1e-12 { uy / e.y } else { 1.0 };
+            let sz = if e.z > 1e-12 {
+                profile.build_z_mm / e.z
+            } else {
+                1.0
+            };
+            let s = sx.min(sy).min(sz);
+            if s <= 0.0 || s > 1.0 + 1e-9 {
+                continue;
+            }
+            candidate.scale_uniform(s);
+            place_on_bed(&mut candidate, profile);
+            if !fits(&candidate, profile, opts.margin) {
+                continue;
+            }
+            let h = candidate.aabb().extents().z;
+            let replace = match &best_scaled {
+                None => true,
+                Some((_, bs, bh)) => {
+                    if opts.prefer_flat {
+                        h < *bh - 1e-6 || ((h - *bh).abs() < 1e-6 && s > *bs)
+                    } else {
+                        s > *bs || ((s - *bs).abs() < 1e-9 && h < *bh)
+                    }
+                }
+            };
+            if replace {
+                best_scaled = Some((candidate, s, h));
+            }
+        }
+    }
+    best_scaled
 }
 
 /// Ensure mesh rests on Z=0; used by diagnostics helpers.
@@ -421,15 +489,32 @@ mod tests {
     }
 
     #[test]
-    fn kitchen_tray_fits_after_autofit() {
+    fn kitchen_tray_scale_to_fit_stays_flat() {
         let mut mesh = IndexedMesh::kitchen_tray();
         let profile = load_profile("k1").expect("p");
-        autofit(&mut mesh, &profile, &AutofitOptions::default()).expect("tray should fit");
-        assert!(fits(&mesh, &profile, 3.0));
+        let res = autofit(
+            &mut mesh,
+            &profile,
+            &AutofitOptions {
+                margin: 3.0,
+                scale_to_fit: true,
+                prefer_flat: true,
+            },
+        )
+        .expect("fit");
+        assert!(res.scale < 1.0);
         let e = mesh.aabb().extents();
-        assert!(e.x <= 214.0 + 1e-3);
-        assert!(e.y <= 214.0 + 1e-3);
-        assert!(e.z <= 250.0 + 1e-3);
+        assert!(e.z < 80.0, "expected flat-ish height, got {}", e.z);
+        assert!(fits(&mesh, &profile, 3.0));
+    }
+
+    #[test]
+    fn kitchen_tray_without_scale_warns_upright() {
+        let mut mesh = IndexedMesh::kitchen_tray();
+        let profile = load_profile("k1").expect("p");
+        let res = autofit(&mut mesh, &profile, &AutofitOptions::default()).expect("fit");
+        assert!(res.summary.contains("upright") || res.summary.contains("scale-to-fit"));
+        assert!(mesh.aabb().extents().z > 100.0);
     }
 
     #[test]
@@ -450,6 +535,7 @@ mod tests {
             &AutofitOptions {
                 margin: 3.0,
                 scale_to_fit: true,
+                prefer_flat: true,
             },
         )
         .expect("scale");

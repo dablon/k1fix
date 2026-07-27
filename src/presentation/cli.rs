@@ -50,6 +50,9 @@ enum Commands {
         no_repair: bool,
         #[arg(long)]
         scale_to_fit: bool,
+        /// Prefer tall orientations (contact-first). Default is flat/low-Z.
+        #[arg(long)]
+        prefer_tall: bool,
         #[arg(long, default_value_t = 3.0)]
         margin: f64,
         #[arg(long, default_value_t = true)]
@@ -125,6 +128,7 @@ fn run_inner() -> Result<u8> {
             no_autofit,
             no_repair,
             scale_to_fit,
+            prefer_tall,
             margin,
             drop_specks,
             dry_run,
@@ -140,6 +144,7 @@ fn run_inner() -> Result<u8> {
                     repair: !no_repair,
                     autofit: !no_autofit,
                     scale_to_fit,
+                    prefer_flat: !prefer_tall,
                     margin,
                     drop_specks,
                     dry_run,

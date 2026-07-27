@@ -19,6 +19,8 @@ pub struct FixOptions {
     pub autofit: bool,
     /// Allow uniform scale when fitting.
     pub scale_to_fit: bool,
+    /// Prefer low Z (flat) orientations for printability.
+    pub prefer_flat: bool,
     /// Bed margin mm.
     pub margin: f64,
     /// Drop speck shells.
@@ -35,6 +37,7 @@ impl Default for FixOptions {
             repair: true,
             autofit: true,
             scale_to_fit: false,
+            prefer_flat: true,
             margin: 3.0,
             drop_specks: true,
             dry_run: false,
@@ -95,6 +98,7 @@ impl<'a, L: MeshLoader, S: MeshStore, P: ProgressSink> FixUseCase<'a, L, S, P> {
                 &AutofitOptions {
                     margin: opts.margin,
                     scale_to_fit: opts.scale_to_fit,
+                    prefer_flat: opts.prefer_flat,
                 },
             ) {
                 Ok(res) => autofit_summary = Some(res.summary),
